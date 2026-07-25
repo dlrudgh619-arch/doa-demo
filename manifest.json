@@ -1,0 +1,24 @@
+{
+  "name": "도아전기 DEMO",
+  "short_name": "도아전기 DEMO",
+  "description": "도아전기 팀 관리 앱 — 체험판 (테스트 전용)",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#F59E0B",
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "./icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "./icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
