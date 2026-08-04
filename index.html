@@ -665,14 +665,16 @@ async function rHome(){
 
 // ══════════════ 현장 ══════════════
 async function rSites(){
-  const[{data},{data:memoCounts},{data:drawingCounts}]=await Promise.all([
+  const[{data},{data:memoCounts},{data:drawingCounts},{data:matCounts}]=await Promise.all([
     db.from('sites').select('*').order('created_at',{ascending:false}),
     db.from('site_memos').select('site_id'),
-    db.from('site_drawings').select('site_id')
+    db.from('site_drawings').select('site_id'),
+    db.from('site_materials').select('site_id')
   ])
   sites=data||[]
   const memoSet=new Set((memoCounts||[]).map(m=>m.site_id))
   const drawingSet=new Set((drawingCounts||[]).map(d=>d.site_id))
+  const matSet=new Set((matCounts||[]).map(m=>m.site_id))
   document.getElementById('hdr-t').textContent='현장 관리'
   document.getElementById('hdr-s').textContent=`총 ${sites.length}개`
   const fl=['전체','진행중','대기중','완료','보류']
@@ -682,6 +684,7 @@ async function rSites(){
     ${ft.length?ft.map(s=>{
       const hasMemo=memoSet.has(s.id)
       const hasDrawing=drawingSet.has(s.id)
+      const hasMat=matSet.has(s.id)
       const addrEsc=(s.address||'').replace(/'/g,'').replace(/"/g,'')
       return `
       <div class="li">
@@ -696,6 +699,7 @@ async function rSites(){
           <button class="bs" onclick="openMaterials('${s.id}','${s.name.replace(/'/g,'')}')">📦 자재</button>
           <button class="bs" onclick="openMemos('${s.id}','${s.name.replace(/'/g,'')}')" style="${hasMemo?'background:#DBEAFE;color:#1D4ED8;border-color:#93C5FD;font-weight:600':''}">💬 메모${hasMemo?' ●':''}</button>
           <button class="bs" onclick="openDrawings('${s.id}','${s.name.replace(/'/g,'')}')" style="${hasDrawing?'background:#EDE9FE;color:#5B21B6;border-color:#C4B5FD;font-weight:600':''}">📐 도면${hasDrawing?' ●':''}</button>
+          ${me.isAdmin?`<button class="bs" onclick="openCompare('${s.id}','${s.name.replace(/'/g,'')}')" style="${hasMat?'background:#DCFCE7;color:#166534;border-color:#86EFAC;font-weight:600':''}">📊 정산${hasMat?' ●':''}</button>`:''}
           ${me.isAdmin?`<button class="bs" onclick="editSite('${s.id}')">✏️ 수정</button><button class="bs" style="color:var(--red)" onclick="delSite('${s.id}')">삭제</button>`:''}
         </div>
       </div>`}).join(''):`<div class="empty"><div class="ei">📍</div><div style="font-size:14px">현장이 없어요</div></div>`}
@@ -1203,6 +1207,185 @@ async function delDrawing(id,siteId,siteName){
   await db.from('site_drawings').delete().eq('id',id)
   toast('삭제됐어요')
   openDrawings(siteId,siteName)
+}
+
+// ══════════════ 현장 정산 (견적 vs 실사용 자재 비교) ══════════════
+// 자재목록(MATS_LIST)과 견적 카탈로그는 품명 표기가 달라서 정규화 후 매칭한다
+const cmpNorm=s=>(s||'').toUpperCase().replace(/[\s\-_()·.]/g,'')
+let _cmpSiteId=null,_cmpSiteName='',_cmpQuotes=[],_cmpQid=null,_cmpMats=[],_cmpCatalog={},_cmpLinked=false
+
+async function openCompare(siteId,siteName){
+  if(!me.isAdmin){toast('정산은 대표만 볼 수 있어요',true);return}
+  _cmpSiteId=siteId;_cmpSiteName=siteName
+  openSheet(`<div class="st">${siteName} — 정산</div><div class="loading"><div class="spin"></div></div>`)
+  const[{data:mats},{data:qs},{data:cat}]=await Promise.all([
+    db.from('site_materials').select('*').eq('site_id',siteId).order('created_at'),
+    db.from('quotes').select('*').order('created_at',{ascending:false}),
+    db.from('catalog_items').select('name,price,unit')
+  ])
+  _cmpMats=mats||[]
+  _cmpCatalog={}
+  ;(cat||[]).forEach(c=>{_cmpCatalog[cmpNorm(c.name)]={price:c.price||0,unit:c.unit||''}})
+  // 견적서는 site_id가 비어있는 경우가 많아 현장명으로도 매칭한다
+  const all=(qs||[]).filter(q=>me.isAdmin||q.created_by_id===me.id)
+  const sn=cmpNorm(siteName)
+  const linked=all.filter(q=>{
+    if(q.site_id===siteId)return true
+    const qn=cmpNorm(q.site_name)
+    return qn&&sn&&(qn===sn||qn.includes(sn)||sn.includes(qn))
+  })
+  _cmpLinked=linked.length>0
+  _cmpQuotes=_cmpLinked?linked:all
+  _cmpQid=_cmpQuotes[0]?.id||null
+  renderCompare()
+}
+
+function setCmpQuote(id){_cmpQid=id;renderCompare()}
+
+function cmpBuildRows(q){
+  const qMap={},mMap={}
+  ;(q?.items||[]).forEach(i=>{
+    const k=cmpNorm(i.name);if(!k)return
+    if(qMap[k])qMap[k].qty+=Number(i.qty)||0
+    else qMap[k]={name:i.name,unit:i.unit||'',cat:i.cat||'기타',qty:Number(i.qty)||0,price:Number(i.price)||0}
+  })
+  _cmpMats.forEach(m=>{
+    const k=cmpNorm(m.name);if(!k)return
+    if(mMap[k])mMap[k].qty+=Number(m.quantity)||0
+    else mMap[k]={name:m.name,unit:m.unit||'EA',qty:Number(m.quantity)||0}
+  })
+  return [...new Set([...Object.keys(qMap),...Object.keys(mMap)])].map(k=>{
+    const qi=qMap[k],mi=mMap[k]
+    const cp=_cmpCatalog[k]
+    const price=qi?qi.price:(cp?cp.price:0)
+    const known=qi?qi.price>0:!!(cp&&cp.price>0)
+    const qQty=qi?qi.qty:0,uQty=mi?mi.qty:0
+    return{
+      key:k,name:(qi||mi).name,unit:(qi&&qi.unit)||(mi&&mi.unit)||'EA',
+      cat:qi?qi.cat:'견적 외',price,known,qQty,uQty,
+      diff:uQty-qQty,qAmt:qQty*price,uAmt:uQty*price,
+      kind:qQty===0?'extra':uQty===0?'unused':uQty>qQty?'over':uQty<qQty?'under':'same'
+    }
+  }).sort((a,b)=>Math.abs(b.uAmt-b.qAmt)-Math.abs(a.uAmt-a.qAmt))
+}
+
+function renderCompare(){
+  const q=_cmpQuotes.find(x=>x.id===_cmpQid)||null
+  const money=me.isAdmin
+  const sn=_cmpSiteName.replace(/'/g,'')
+  let html=`<div class="st">${_cmpSiteName} — 정산</div>`
+
+  if(!_cmpQuotes.length){
+    html+=`<div class="empty"><div class="ei">📄</div><div style="font-size:14px">견적서가 없어요</div><div style="font-size:12px;margin-top:4px;opacity:.7">견적 탭에서 먼저 작성하세요</div></div>`
+    document.getElementById('sc').innerHTML=html;return
+  }
+
+  html+=`<div class="fg" style="margin-bottom:10px">
+    <label class="fl">비교할 견적서${_cmpLinked?'':' <span style="color:var(--red);font-weight:400">· 현장명이 일치하는 견적이 없어 전체 목록을 표시해요</span>'}</label>
+    <select class="fi" onchange="setCmpQuote(this.value)">
+      ${_cmpQuotes.map(x=>`<option value="${x.id}" ${x.id===_cmpQid?'selected':''}>${x.site_name||x.client||'제목없음'} · ${(x.grand||0).toLocaleString()}원 · ${x.created_at?.slice(0,10)||''}</option>`).join('')}
+    </select>
+  </div>`
+
+  if(!_cmpMats.length){
+    html+=`<div class="empty"><div class="ei">📦</div><div style="font-size:14px">실사용 자재가 없어요</div><div style="font-size:12px;margin-top:4px;opacity:.7">📦 자재에서 먼저 등록하세요</div></div>`
+    document.getElementById('sc').innerHTML=html;return
+  }
+
+  const rows=cmpBuildRows(q)
+  const qTotal=rows.reduce((s,r)=>s+r.qAmt,0)
+  const uTotal=rows.reduce((s,r)=>s+r.uAmt,0)
+  const gap=qTotal-uTotal
+  const unknown=rows.filter(r=>!r.known&&(r.qQty||r.uQty)).length
+
+  if(money){
+    const gc=gap>=0?'#059669':'#DC2626'
+    html+=`<div style="background:var(--bg);border-radius:10px;padding:14px;margin-bottom:12px">
+      <div class="qo-sum-row"><span>견적 자재비</span><span style="font-weight:600">${qTotal.toLocaleString()}원</span></div>
+      <div class="qo-sum-row"><span>실사용 자재비</span><span style="font-weight:600">${uTotal.toLocaleString()}원</span></div>
+      <div style="border-top:.5px solid var(--border);margin:7px 0"></div>
+      <div class="qo-sum-row" style="font-size:15px">
+        <span style="font-weight:700">${gap>=0?'자재 절감':'자재 초과'}</span>
+        <span style="font-weight:800;color:${gc}">${gap>=0?'+':'−'}${Math.abs(gap).toLocaleString()}원</span>
+      </div>
+      ${qTotal?`<div style="text-align:right;font-size:11px;color:var(--text2);margin-top:2px">견적 대비 ${(uTotal/qTotal*100).toFixed(1)}% 사용</div>`:''}
+    </div>
+    <div style="background:#FFFBEB;border:1px solid #FDE68A;border-radius:8px;padding:9px 12px;font-size:11px;color:#92400E;line-height:1.6;margin-bottom:12px">
+      ⚠️ 실사용 금액은 <b>견적 단가</b> 기준 추정치예요. 실제 매입단가를 넣어야 정확한 손익이 나와요.
+      ${unknown?`<br>단가를 못 찾은 품목이 <b>${unknown}개</b> 있어요 (금액 0 처리).`:''}
+    </div>`
+  }
+
+  const groups=[
+    ['over','⚠️ 초과 사용','#FEF2F2','#991B1B'],
+    ['extra','➕ 견적에 없던 자재','#FFF7ED','#9A3412'],
+    ['under','📉 견적보다 적게 사용','#EFF6FF','#1E40AF'],
+    ['unused','🚫 미사용','#F8FAFC','#475569'],
+    ['same','✅ 견적과 일치','#F0FDF4','#166534']
+  ]
+  groups.forEach(([kind,label,bg,fg])=>{
+    const list=rows.filter(r=>r.kind===kind)
+    if(!list.length)return
+    html+=`<div style="background:${bg};color:${fg};font-size:12px;font-weight:700;padding:7px 11px;border-radius:7px;margin:12px 0 6px">${label} (${list.length})</div>`
+    list.forEach(r=>{
+      const dc=r.diff>0?'#DC2626':r.diff<0?'#2563EB':'var(--text2)'
+      html+=`<div style="padding:9px 2px;border-bottom:.5px solid var(--border)">
+        <div style="display:flex;justify-content:space-between;gap:8px">
+          <div style="font-size:13px;font-weight:500;flex:1">${r.name}${!r.known&&money?'<span style="font-size:10px;color:var(--red);margin-left:4px">단가?</span>':''}</div>
+          ${money?`<div style="font-size:12px;font-weight:600;color:${dc};white-space:nowrap">${r.uAmt-r.qAmt>0?'+':''}${(r.uAmt-r.qAmt).toLocaleString()}원</div>`:''}
+        </div>
+        <div style="font-size:11px;color:var(--text2);margin-top:3px">
+          견적 ${r.qQty}${r.unit} → 실사용 ${r.uQty}${r.unit}
+          <span style="color:${dc};font-weight:600">(${r.diff>0?'+':''}${r.diff}${r.unit})</span>
+        </div>
+      </div>`
+    })
+  })
+
+  if(money)html+=`<button class="btn" style="background:#F1F5F9;color:var(--navy);margin-top:14px" onclick="printComparePDF('${sn}')">📄 정산서 PDF</button>`
+  document.getElementById('sc').innerHTML=html
+}
+
+function printComparePDF(siteName){
+  const q=_cmpQuotes.find(x=>x.id===_cmpQid)||null
+  const rows=cmpBuildRows(q)
+  const qTotal=rows.reduce((s,r)=>s+r.qAmt,0)
+  const uTotal=rows.reduce((s,r)=>s+r.uAmt,0)
+  const gap=qTotal-uTotal
+  const KIND={over:'초과',extra:'견적외',under:'절감',unused:'미사용',same:'일치'}
+  const html=`<!doctype html><html><head><meta charset="utf-8"><title>정산서_${siteName}</title>
+<style>@page{margin:0;size:auto}@media print{.no-print{display:none!important}body{padding:16px}}
+body{font-family:-apple-system,'Malgun Gothic',sans-serif;padding:24px;color:#222;font-size:12px}
+h1{font-size:20px;text-align:center;margin:0 0 4px}
+.sub{text-align:center;color:#666;font-size:12px;margin-bottom:18px}
+table{width:100%;border-collapse:collapse;margin-bottom:16px}
+th{background:#E8F0F8;color:#1A3A5C;font-size:11px;padding:7px 8px;border:.5px solid #ccd}
+td{padding:6px 8px;border:.5px solid #ddd;font-size:11px}
+.r{text-align:right}.c{text-align:center}
+.sum{width:280px;margin-left:auto}
+.sum td{border:none;padding:4px 8px}
+.tot{border-top:1.5px solid #1A3A5C;font-weight:700;font-size:14px}
+.pos{color:#059669}.neg{color:#DC2626}</style></head><body>
+<h1>현 장 정 산 서</h1>
+<div class="sub">${siteName} &nbsp;|&nbsp; 견적서: ${q?.site_name||q?.client||'-'} &nbsp;|&nbsp; 출력일 ${new Date().toISOString().slice(0,10)}</div>
+<table><thead><tr><th>구분</th><th>품목</th><th class="c">단위</th><th class="r">견적수량</th><th class="r">실사용</th><th class="r">차이</th><th class="r">견적금액</th><th class="r">실사용금액</th><th class="r">차액</th></tr></thead><tbody>
+${rows.map(r=>`<tr><td class="c">${KIND[r.kind]}</td><td>${r.name}</td><td class="c">${r.unit}</td><td class="r">${r.qQty}</td><td class="r">${r.uQty}</td><td class="r">${r.diff>0?'+':''}${r.diff}</td><td class="r">${r.qAmt.toLocaleString()}</td><td class="r">${r.uAmt.toLocaleString()}</td><td class="r ${r.uAmt-r.qAmt>0?'neg':'pos'}">${r.uAmt-r.qAmt>0?'+':''}${(r.uAmt-r.qAmt).toLocaleString()}</td></tr>`).join('')}
+</tbody></table>
+<table class="sum">
+<tr><td>견적 자재비</td><td class="r">${qTotal.toLocaleString()}원</td></tr>
+<tr><td>실사용 자재비</td><td class="r">${uTotal.toLocaleString()}원</td></tr>
+<tr class="tot"><td>${gap>=0?'자재 절감':'자재 초과'}</td><td class="r ${gap>=0?'pos':'neg'}">${gap>=0?'+':'−'}${Math.abs(gap).toLocaleString()}원</td></tr>
+</table>
+<div style="margin-top:20px;font-size:10px;color:#888;line-height:1.6">
+※ 실사용 금액은 견적 단가를 기준으로 산출한 추정치입니다. 실제 매입단가와 다를 수 있습니다.<br>
+※ 인건비 및 4대보험 부담분은 포함되어 있지 않습니다.
+</div>
+<div class="no-print" style="text-align:center;margin-top:24px"><button onclick="window.print()" style="padding:10px 28px;font-size:14px;background:#1A3A5C;color:#fff;border:none;border-radius:8px;cursor:pointer">🖨 인쇄 / PDF 저장</button></div>
+</body></html>`
+  const blob=new Blob([html],{type:'text/html;charset=utf-8'})
+  const url=URL.createObjectURL(blob)
+  window.open(url,'_blank')
+  setTimeout(()=>URL.revokeObjectURL(url),120000)
 }
 
 // ══════════════ 일정 (네이버웍스 스타일) ══════════════
