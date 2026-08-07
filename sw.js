@@ -1,4 +1,4 @@
-const CACHE='doa-demo-v3'
+const CACHE='doa-demo-v4'
 const ASSETS=['./','./index.html']
 self.addEventListener('install',e=>{
   e.waitUntil(caches.open(CACHE).then(c=>c.addAll(ASSETS)))
@@ -13,7 +13,7 @@ self.addEventListener('fetch',e=>{
 })
 self.addEventListener('push',e=>{
   const d=e.data?.json()||{}
-  e.waitUntil(self.registration.showNotification(d.title||'도아전기 DEMO',{
+  e.waitUntil(self.registration.showNotification(d.title||'현장대장 DEMO',{
     body:d.body||'',icon:'./icon-192.png',badge:'./icon-192.png',vibrate:[200,100,200],data:d
   }))
 })

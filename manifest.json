@@ -1,7 +1,7 @@
 {
-  "name": "도아전기 DEMO",
-  "short_name": "도아전기 DEMO",
-  "description": "도아전기 팀 관리 앱 — 체험판 (테스트 전용)",
+  "name": "현장대장 DEMO",
+  "short_name": "현장대장 DEMO",
+  "description": "현장대장 — 현장·견적·근태 관리 앱 체험판 (테스트 전용)",
   "start_url": "./",
   "display": "standalone",
   "background_color": "#ffffff",
